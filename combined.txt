@@ -1,0 +1,911 @@
+.env 
+PORT=3000
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=manager
+DB_NAME=book_review_db
+JWT_SECRET=mySuper$ecretKey123!@#
+
+
+===== E:\Projects\mini_projects\book-review-api\server.js ===== 
+// Load environment variables from .env file
+require('dotenv').config();
+
+const express = require('express');
+const connectDB = require('./config/db'); // MySQL connection + Sequelize instance
+const User = require('./models/User');    // Import User model
+const { sequelize } = require('./config/db');
+
+const app = express();
+
+// Connect to database (this function will connect to MySQL)
+connectDB();
+
+// Init Middleware to parse JSON in request body
+app.use(express.json({ extended: false }));
+
+// Define a simple root route for testing
+app.get('/', (req, res) => res.send('Book Review API is running!'));
+
+// Auth routes (signup, login)
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/books', require('./routes/books'));
+app.use('/api/reviews', require('./routes/reviews'));
+
+
+
+// Sync Sequelize models to create tables if they don't exist
+sequelize.sync({ alter: true })
+  .then(() => {
+    console.log('🗃️ Tables synced');
+
+    // Start the server after successful DB sync
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+  })
+  .catch(err => {
+    console.error('Table sync error:', err);
+  });
+
+===== E:\Projects\mini_projects\book-review-api\config\db.js ===== 
+// config/db.js
+const { Sequelize } = require('sequelize');
+require('dotenv').config();
+
+const sequelize = new Sequelize(
+  process.env.DB_NAME,
+  process.env.DB_USER,
+  process.env.DB_PASSWORD,
+  {
+    host: process.env.DB_HOST,
+    dialect: 'mysql',
+    logging: false, // optional: disables SQL logging in console
+  }
+);
+
+const connectDB = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('✅ MySQL connected!');
+  } catch (err) {
+    console.error('❌ Unable to connect to DB:', err.message);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+module.exports.sequelize = sequelize;
+
+===== E:\Projects\mini_projects\book-review-api\controllers\bookController.js ===== 
+const { Op } = require('sequelize');
+const Book = require('../models/Book');
+const Review = require('../models/Review');
+const User = require('../models/User');
+
+// POST /books
+exports.addBook = async (req, res) => {
+  try {
+    const { title, author, genre, description } = req.body;
+    if (!title || !author) {
+      return res.status(400).json({ msg: 'Title and Author are required' });
+    }
+
+    const newBook = await Book.create({ title, author, genre, description });
+    res.json(newBook);
+  } catch (err) {
+    console.error('Error in addBook:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// GET /books/search?q=term
+exports.searchBooks = async (req, res) => {
+  try {
+    const searchTerm = req.query.q;
+    if (!searchTerm) {
+      return res.status(400).json({ msg: 'Search query (q) is required' });
+    }
+
+    const books = await Book.findAll({
+      where: {
+        [Op.or]: [
+          { title: { [Op.like]: `%${searchTerm}%` } },
+          { author: { [Op.like]: `%${searchTerm}%` } }
+        ]
+      }
+    });
+
+    res.json(books);
+  } catch (err) {
+    console.error('Error in searchBooks:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// GET /books
+exports.getBooks = async (req, res) => {
+  try {
+    let { page = 1, limit = 5, author, genre } = req.query;
+    page = parseInt(page);
+    limit = parseInt(limit);
+    const offset = (page - 1) * limit;
+
+    let where = {};
+    if (author) where.author = author;
+    if (genre) where.genre = genre;
+
+    const result = await Book.findAndCountAll({ where, offset, limit });
+
+    res.json({
+      totalBooks: result.count,
+      currentPage: page,
+      totalPages: Math.ceil(result.count / limit),
+      books: result.rows
+    });
+  } catch (err) {
+    console.error('Error in getBooks:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// GET /books/:id
+exports.getBookDetails = async (req, res) => {
+  try {
+    const bookId = req.params.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 5;
+    const offset = (page - 1) * limit;
+
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    const reviewsData = await Review.findAll({
+      where: { bookId },
+      attributes: ['rating']
+    });
+
+    let avgRating = 0;
+    if (reviewsData.length > 0) {
+      const total = reviewsData.reduce((sum, r) => sum + r.rating, 0);
+      avgRating = parseFloat((total / reviewsData.length).toFixed(2));
+    }
+
+    const reviews = await Review.findAndCountAll({
+      where: { bookId },
+      include: [{ model: User, attributes: ['id', 'name'] }],
+      limit,
+      offset,
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json({
+      book,
+      averageRating: avgRating,
+      reviews: {
+        totalReviews: reviews.count,
+        totalPages: Math.ceil(reviews.count / limit),
+        currentPage: page,
+        data: reviews.rows
+      }
+    });
+  } catch (err) {
+    console.error('Error in getBookDetails:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// GET /books-with-reviews
+exports.getBooksWithReviews = async (req, res) => {
+  try {
+    let { page = 1, limit = 5, author, genre } = req.query;
+    page = parseInt(page);
+    limit = parseInt(limit);
+    const offset = (page - 1) * limit;
+
+    let where = {};
+    if (author) where.author = author;
+    if (genre) where.genre = genre;
+
+    const result = await Book.findAndCountAll({
+      where,
+      offset,
+      limit,
+      include: [
+        {
+          model: Review,
+          include: [{ model: User, attributes: ['id', 'name'] }]
+        }
+      ],
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json({
+      totalBooks: result.count,
+      currentPage: page,
+      totalPages: Math.ceil(result.count / limit),
+      books: result.rows
+    });
+  } catch (err) {
+    console.error('Error in getBooksWithReviews:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// PUT /books/:id
+exports.updateBook = async (req, res) => {
+  try {
+    const bookId = req.params.id;
+    const { title, author, genre, description } = req.body;
+
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    book.title = title || book.title;
+    book.author = author || book.author;
+    book.genre = genre || book.genre;
+    book.description = description || book.description;
+
+    await book.save();
+    res.json(book);
+  } catch (err) {
+    console.error('Error in updateBook:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// DELETE /books/:id
+exports.deleteBook = async (req, res) => {
+  try {
+    const bookId = req.params.id;
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    await book.destroy();
+    res.json({ msg: 'Book deleted successfully' });
+  } catch (err) {
+    console.error('Error in deleteBook:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+===== E:\Projects\mini_projects\book-review-api\controllers\reviewController.js ===== 
+const Review = require('../models/Review');
+const Book = require('../models/Book');
+
+// POST /reviews/:bookId
+exports.addReview = async (req, res) => {
+  try {
+    const { bookId } = req.params;
+    const userId = req.user.id;
+    const { rating, comment } = req.body;
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ msg: 'Rating must be between 1 and 5' });
+    }
+
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    const existingReview = await Review.findOne({ where: { bookId, userId } });
+    if (existingReview) {
+      return res.status(400).json({ msg: 'You have already reviewed this book' });
+    }
+
+    const review = await Review.create({ rating, comment, userId, bookId });
+    res.json(review);
+  } catch (err) {
+    console.error('Error in addReview:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// PUT /reviews/:id
+exports.updateReview = async (req, res) => {
+  try {
+    const reviewId = req.params.id;
+    const userId = req.user.id;
+    const { rating, comment } = req.body;
+
+    const review = await Review.findByPk(reviewId);
+    if (!review) return res.status(404).json({ msg: 'Review not found' });
+    if (review.userId !== userId) return res.status(401).json({ msg: 'Not authorized' });
+
+    if (rating) {
+      if (rating < 1 || rating > 5) {
+        return res.status(400).json({ msg: 'Rating must be between 1 and 5' });
+      }
+      review.rating = rating;
+    }
+    if (comment !== undefined) {
+      review.comment = comment;
+    }
+
+    await review.save();
+    res.json(review);
+  } catch (err) {
+    console.error('Error in updateReview:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+// DELETE /reviews/:id
+exports.deleteReview = async (req, res) => {
+  try {
+    const reviewId = req.params.id;
+    const userId = req.user.id;
+
+    const review = await Review.findByPk(reviewId);
+    if (!review) return res.status(404).json({ msg: 'Review not found' });
+    if (review.userId !== userId) return res.status(401).json({ msg: 'Not authorized' });
+
+    await review.destroy();
+    res.json({ msg: 'Review deleted' });
+  } catch (err) {
+    console.error('Error in deleteReview:', err.message);
+    res.status(500).send('Server error');
+  }
+};
+
+
+
+===== E:\Projects\mini_projects\book-review-api\middleware\auth.js ===== 
+const jwt = require('jsonwebtoken');
+
+module.exports = function(req, res, next) {
+  // Get token from header
+ const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+
+  // Check if no token
+  if (!token) {
+    return res.status(401).json({ msg: 'No token, authorization denied' });
+  }
+
+  // Verify token
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+     req.user = { id: decoded.userId }; // attach user info to request
+    next();
+  } catch (err) {
+    res.status(401).json({ msg: 'Token is not valid' });
+  }
+};
+
+===== E:\Projects\mini_projects\book-review-api\models\Book.js ===== 
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
+
+const Book = sequelize.define('Book', {
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true,
+  },
+  title: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  author: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+  genre: {
+    type: DataTypes.STRING,
+  },
+  description: {
+    type: DataTypes.TEXT,
+  }
+}, {
+  timestamps: true,
+  tableName: 'books',
+});
+
+module.exports = Book;
+
+===== E:\Projects\mini_projects\book-review-api\models\Review.js ===== 
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
+const User = require('./User');
+const Book = require('./Book');
+
+const Review = sequelize.define('Review', {
+  id: {
+    type: DataTypes.INTEGER,
+    autoIncrement: true,
+    primaryKey: true,
+  },
+  rating: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    validate: {
+      min: 1,
+      max: 5
+    }
+  },
+  comment: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  }
+}, {
+  tableName: 'reviews',
+  timestamps: true,
+});
+
+// Relationships
+User.hasMany(Review, { foreignKey: 'userId' });
+Review.belongsTo(User, { foreignKey: 'userId' });
+
+Book.hasMany(Review, { foreignKey: 'bookId' });
+Review.belongsTo(Book, { foreignKey: 'bookId' });
+
+module.exports = Review;
+
+===== E:\Projects\mini_projects\book-review-api\models\User.js ===== 
+// models/User.js
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
+
+const User = sequelize.define('User', {
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  email: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false
+  }
+});
+
+module.exports = User;
+
+===== E:\Projects\mini_projects\book-review-api\routes\auth.js ===== 
+const express = require('express');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+require('dotenv').config();
+
+// POST /api/auth/signup
+router.post('/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    // Basic validation
+    if (!name || !email || !password) {
+      return res.status(400).json({ msg: 'Please enter all fields' });
+    }
+
+    // Check if user exists
+    let user = await User.findOne({ where: { email } });
+    if (user) {
+      return res.status(400).json({ msg: 'User already exists' });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Create user
+    user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+    });
+
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user.id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// POST /api/auth/login
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Basic validation
+    if (!email || !password) {
+      return res.status(400).json({ msg: 'Please enter all fields' });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ where: { email } });
+    if (!user) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    // Compare passwords
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user.id },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+module.exports = router;
+
+===== E:\Projects\mini_projects\book-review-api\routes\books.js ===== 
+const express = require('express');
+const router = express.Router();
+const Book = require('../models/Book');
+const Review = require('../models/Review');
+const User = require('../models/User');
+const auth = require('../middleware/auth');  // For protected routes
+const { Op, fn, col } = require('sequelize');  // ✅ Sequelize functions
+
+// Add new book - only logged in users
+router.post('/', auth, async (req, res) => {
+  try {
+    const { title, author, genre, description } = req.body;
+
+    if (!title || !author) {
+      return res.status(400).json({ msg: 'Title and Author are required' });
+    }
+
+    const newBook = await Book.create({
+      title: title,
+      author: author,
+      genre: genre,
+      description: description
+    });
+
+    res.json(newBook);
+  } catch (err) {
+    console.error('Error in POST /books:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// --- New Search Route ---
+// GET /search?q=keyword
+router.get('/search', async (req, res) => {
+  try {
+    const searchTerm = req.query.q;
+    if (!searchTerm) {
+      return res.status(400).json({ msg: 'Search query (q) is required' });
+    }
+
+    const books = await Book.findAll({
+      where: {
+        [Op.or]: [
+          {
+            title: {
+              [Op.like]: `%${searchTerm}%`
+            }
+          },
+          {
+            author: {
+              [Op.like]: `%${searchTerm}%`
+            }
+          }
+        ]
+      }
+    });
+
+    res.json(books);
+  } catch (err) {
+    console.error('Error in GET /books/search:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// Get books with pagination and filters
+router.get('/', async (req, res) => {
+  try {
+    let page = parseInt(req.query.page) || 1;
+    let limit = parseInt(req.query.limit) || 5;
+
+    let author = req.query.author || null;
+    let genre = req.query.genre || null;
+
+    let where = {};
+    if (author) {
+      where.author = author;
+    }
+    if (genre) {
+      where.genre = genre;
+    }
+
+    const offset = (page - 1) * limit;
+
+    const result = await Book.findAndCountAll({
+      where: where,
+      offset: offset,
+      limit: limit
+    });
+
+    res.json({
+      totalBooks: result.count,
+      currentPage: page,
+      totalPages: Math.ceil(result.count / limit),
+      books: result.rows
+    });
+  } catch (err) {
+    console.error('Error in GET /books:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// Get book details by ID with average rating & paginated reviews
+router.get('/:id', async (req, res) => {
+  try {
+    const bookId = req.params.id;
+    const page = parseInt(req.query.page) || 1;   // Page number for reviews
+    const limit = parseInt(req.query.limit) || 5; // Reviews per page
+    const offset = (page - 1) * limit;
+
+    // Find book
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    // Get all ratings to calculate average rating
+    const reviewsData = await Review.findAll({
+      where: { bookId },
+      attributes: ['rating']
+    });
+
+    let avgRating = 0;
+    if (reviewsData.length > 0) {
+      const total = reviewsData.reduce((acc, review) => acc + review.rating, 0);
+      avgRating = total / reviewsData.length;
+      avgRating = parseFloat(avgRating.toFixed(2)); // round to 2 decimals
+    }
+
+    // Get paginated reviews with user info
+    const reviews = await Review.findAndCountAll({
+      where: { bookId },
+      include: [{ model: User, attributes: ['id', 'name'] }],
+      limit,
+      offset,
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json({
+      book,
+      averageRating: avgRating,
+      reviews: {
+        totalReviews: reviews.count,
+        totalPages: Math.ceil(reviews.count / limit),
+        currentPage: page,
+        data: reviews.rows
+      }
+    });
+  } catch (err) {
+    console.error('Error in GET /books/:id', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// --- New route to get books with all reviews and user info included ---
+// GET /books-with-reviews
+router.get('/books-with-reviews', async (req, res) => {
+  try {
+    let page = parseInt(req.query.page) || 1;
+    let limit = parseInt(req.query.limit) || 5;
+
+    let author = req.query.author || null;
+    let genre = req.query.genre || null;
+
+    let where = {};
+    if (author) {
+      where.author = author;
+    }
+    if (genre) {
+      where.genre = genre;
+    }
+
+    const offset = (page - 1) * limit;
+
+    const result = await Book.findAndCountAll({
+      where: where,
+      offset: offset,
+      limit: limit,
+      include: [
+        {
+          model: Review,
+          include: [
+            {
+              model: User,
+              attributes: ['id', 'name']
+            }
+          ]
+        }
+      ],
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json({
+      totalBooks: result.count,
+      currentPage: page,
+      totalPages: Math.ceil(result.count / limit),
+      books: result.rows
+    });
+  } catch (err) {
+    console.error('Error in GET /books-with-reviews:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// Update a book by ID - only logged in users
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const bookId = req.params.id;
+    const { title, author, genre, description } = req.body;
+
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    book.title = title || book.title;
+    book.author = author || book.author;
+    book.genre = genre || book.genre;
+    book.description = description || book.description;
+
+    await book.save();
+    res.json(book);
+  } catch (err) {
+    console.error('Error in PUT /books/:id:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// Delete a book by ID - only logged in users
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const bookId = req.params.id;
+
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    await book.destroy();
+    res.json({ msg: 'Book deleted successfully' });
+  } catch (err) {
+    console.error('Error in DELETE /books/:id:', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+module.exports = router;
+
+===== E:\Projects\mini_projects\book-review-api\routes\reviews.js ===== 
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/auth');
+const Review = require('../models/Review');
+const Book = require('../models/Book');
+
+// POST /reviews/:bookId - Add review for a book (one review per user per book)
+router.post('/:bookId', auth, async (req, res) => {
+  try {
+    const { bookId } = req.params;
+    const userId = req.user.id;
+    const { rating, comment } = req.body;
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ msg: 'Rating must be between 1 and 5' });
+    }
+
+    // Check if book exists
+    const book = await Book.findByPk(bookId);
+    if (!book) return res.status(404).json({ msg: 'Book not found' });
+
+    // Check if user already reviewed this book
+    const existingReview = await Review.findOne({ where: { bookId, userId } });
+    if (existingReview) {
+      return res.status(400).json({ msg: 'You have already reviewed this book' });
+    }
+
+    // Create review
+    const review = await Review.create({
+      rating,
+      comment,
+      userId,
+      bookId
+    });
+
+    res.json(review);
+  } catch (err) {
+    console.error('Error in POST /reviews/:bookId', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// PUT /reviews/:id - Update your review
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const reviewId = req.params.id;
+    const userId = req.user.id;
+    const { rating, comment } = req.body;
+
+    // Find review
+    const review = await Review.findByPk(reviewId);
+    if (!review) return res.status(404).json({ msg: 'Review not found' });
+
+    // Check if user owns the review
+    if (review.userId !== userId) {
+      return res.status(401).json({ msg: 'Not authorized' });
+    }
+
+    // Update fields if present
+    if (rating) {
+      if (rating < 1 || rating > 5) {
+        return res.status(400).json({ msg: 'Rating must be between 1 and 5' });
+      }
+      review.rating = rating;
+    }
+    if (comment !== undefined) {
+      review.comment = comment;
+    }
+
+    await review.save();
+
+    res.json(review);
+  } catch (err) {
+    console.error('Error in PUT /reviews/:id', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// DELETE /reviews/:id - Delete your review
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const reviewId = req.params.id;
+    const userId = req.user.id;
+
+    const review = await Review.findByPk(reviewId);
+    if (!review) return res.status(404).json({ msg: 'Review not found' });
+
+    if (review.userId !== userId) {
+      return res.status(401).json({ msg: 'Not authorized' });
+    }
+
+    await review.destroy();
+    res.json({ msg: 'Review deleted' });
+  } catch (err) {
+    console.error('Error in DELETE /reviews/:id', err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+module.exports = router;
+

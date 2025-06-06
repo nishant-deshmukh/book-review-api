@@ -1,0 +1,34 @@
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Sequelize
+migrations/*.js
+seeders/*.js
+config/config.json
+
+# SQLite (if used)
+*.sqlite
+*.sqlite3
+
+# VS Code settings
+.vscode/
+
+# # Postman collections (optional: keep only if you don't want to share)
+# *.postman_collection.json
+
+# Coverage reports (if you use testing tools)
+coverage/
